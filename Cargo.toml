@@ -2,7 +2,7 @@
 name = "timetree-scraper-rust"
 version = "0.1.0"
 edition = "2024"
-description = "Scrape public TimeTree events into JSON or ICS."
+description = "Scrape public TimeTree events into JSON, ICS or Google Calendar CSV."
 
 [[bin]]
 name = "extract-timetree"
@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow = "1"
 base64 = "0.22"
 chrono = "0.4"
+chrono-tz = "0.10"
 chromiumoxide = "0.9"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"

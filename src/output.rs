@@ -1,9 +1,12 @@
-//! Write scraped events as JSON or iCalendar.
+//! Write scraped events as JSON, iCalendar or Google Calendar CSV.
 
 use std::fs;
 use std::path::Path;
 
-use chrono::{DateTime, Datelike, Days, FixedOffset, NaiveDate, NaiveDateTime, TimeDelta, Utc};
+use chrono::{
+    DateTime, Datelike, Days, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeDelta, Utc,
+};
+use chrono_tz::Tz;
 use icalendar::{Calendar, Component, Event, EventLike};
 use serde_json::{Map, Value, json};
 
@@ -36,6 +39,18 @@ const DESCRIPTION_KEYS: &[&str] = &["description", "note", "memo", "details", "b
 const LOCATION_KEYS: &[&str] = &["location", "place", "place.name", "venue", "venue.name"];
 const UID_KEYS: &[&str] = &["id", "uuid", "uid"];
 
+/// Column headers for Google Calendar's CSV import, which must be in English.
+const CSV_HEADERS: [&str; 8] = [
+    "Subject",
+    "Start Date",
+    "Start Time",
+    "End Date",
+    "End Time",
+    "All Day Event",
+    "Description",
+    "Location",
+];
+
 /// A parsed start or end value: a calendar date, or a date-time that keeps
 /// its original UTC offset so that its date part is the one the source meant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,15 +77,41 @@ impl DateValue {
     }
 }
 
+/// When an event happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventTimes {
+    Timed {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
+    /// Whole days from `start` up to, but not including, `end`.
+    AllDay { start: NaiveDate, end: NaiveDate },
+}
+
+/// The parts of a TimeTree event that calendar files keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CalendarEvent {
+    title: String,
+    description: Option<String>,
+    location: Option<String>,
+    uid: Option<String>,
+    times: EventTimes,
+}
+
 /// Write `events` to `output_file` in the given format.
+///
+/// `timezone` is used only for CSV, whose times are wall-clock times; `None`
+/// means the system time zone.
 pub fn write_events(
     output_file: &Path,
     events: &[EventPayload],
     format: OutputFormat,
+    timezone: Option<Tz>,
 ) -> Result<(), WriteError> {
     let contents = match format {
         OutputFormat::Json => to_json(events)?,
         OutputFormat::Ics => to_ics(events),
+        OutputFormat::Csv => to_csv(events, timezone),
     };
     fs::write(output_file, contents).map_err(|source| WriteError::Io {
         path: output_file.to_owned(),
@@ -88,69 +129,157 @@ fn to_json(events: &[EventPayload]) -> serde_json::Result<String> {
 /// Events with no parseable start time are skipped, and a message is printed.
 fn to_ics(events: &[EventPayload]) -> String {
     let mut calendar = Calendar::new();
-    for source_event in events {
-        match to_ics_event(source_event) {
-            Some(event) => {
-                calendar.push(event);
-            }
-            None => {
-                let id = source_event.get("id").map_or("<unknown>".into(), py_str);
-                println!("Skipping event with no start time: {id}");
-            }
-        }
+    for event in parse_events(events) {
+        calendar.push(to_ics_event(&event));
     }
     calendar.done().to_string()
 }
 
-/// Convert a TimeTree event to an iCalendar event.
+/// Convert an event to an iCalendar event.
+///
+/// Description, location and UID are set only when present.
+fn to_ics_event(source_event: &CalendarEvent) -> Event {
+    let mut event = Event::new();
+    event.summary(&source_event.title);
+    if let Some(description) = &source_event.description {
+        event.description(description);
+    }
+    if let Some(location) = &source_event.location {
+        event.location(location);
+    }
+    if let Some(uid) = &source_event.uid {
+        event.uid(uid);
+    }
+    match source_event.times {
+        EventTimes::Timed { start, end } => event.starts(start).ends(end),
+        EventTimes::AllDay { start, end } => event.starts(start).ends(end),
+    };
+    event.done()
+}
+
+/// Convert the events to a CSV file for Google Calendar's import, following
+/// <https://support.google.com/calendar/answer/37118>.
+///
+/// CSV has no time zone field, so timed events are written as wall-clock
+/// times in `timezone` (the system time zone if `None`). Google Calendar reads
+/// them in the time zone of the calendar they are imported into. Events with
+/// no parseable start time are skipped, and a message is printed.
+fn to_csv(events: &[EventPayload], timezone: Option<Tz>) -> String {
+    let mut csv = String::new();
+    push_csv_record(&mut csv, &CSV_HEADERS);
+    for event in parse_events(events) {
+        push_csv_record(&mut csv, &to_csv_record(&event, timezone));
+    }
+    csv
+}
+
+/// Convert an event to a row of [`CSV_HEADERS`] values.
+///
+/// Dates are `MM/DD/YYYY` and times are 12-hour `H:MM AM`, as Google expects.
+/// All-day events have no times, and their end date is the last day of the
+/// event rather than the day after it.
+fn to_csv_record(event: &CalendarEvent, timezone: Option<Tz>) -> [String; 8] {
+    let date = |date: NaiveDate| date.format("%m/%d/%Y").to_string();
+    let date_time = |datetime: DateTime<Utc>| {
+        let local = match timezone {
+            Some(timezone) => datetime.with_timezone(&timezone).naive_local(),
+            None => datetime.with_timezone(&Local).naive_local(),
+        };
+        (date(local.date()), local.format("%-I:%M %p").to_string())
+    };
+    let ((start_date, start_time), (end_date, end_time), all_day) = match event.times {
+        EventTimes::Timed { start, end } => (date_time(start), date_time(end), "False"),
+        EventTimes::AllDay { start, end } => (
+            (date(start), String::new()),
+            (date(end - Days::new(1)), String::new()),
+            "True",
+        ),
+    };
+    [
+        event.title.clone(),
+        start_date,
+        start_time,
+        end_date,
+        end_time,
+        all_day.to_owned(),
+        event.description.clone().unwrap_or_default(),
+        event.location.clone().unwrap_or_default(),
+    ]
+}
+
+/// Append a CSV record, quoting fields that contain a comma, a double quote
+/// or a line break, and ending it with CRLF (RFC 4180).
+fn push_csv_record(csv: &mut String, fields: &[impl AsRef<str>]) {
+    for (i, field) in fields.iter().enumerate() {
+        if i > 0 {
+            csv.push(',');
+        }
+        let field = field.as_ref();
+        if field.contains([',', '"', '\n', '\r']) {
+            csv.push('"');
+            csv.push_str(&field.replace('"', "\"\""));
+            csv.push('"');
+        } else {
+            csv.push_str(field);
+        }
+    }
+    csv.push_str("\r\n");
+}
+
+/// Parse the events, skipping those with no parseable start time and
+/// printing a message for each.
+fn parse_events(events: &[EventPayload]) -> Vec<CalendarEvent> {
+    events
+        .iter()
+        .filter_map(|source_event| {
+            let event = parse_event(source_event);
+            if event.is_none() {
+                let id = source_event.get("id").map_or("<unknown>".into(), py_str);
+                println!("Skipping event with no start time: {id}");
+            }
+            event
+        })
+        .collect()
+}
+
+/// Read the calendar fields of a TimeTree event.
 ///
 /// Each field is read from the first matching name among several candidates
 /// (see [`first_value`]). Returns `None` if the event has no parseable start
 /// time.
 ///
 /// - An event is all-day if it has an all-day flag or a date-only start.
-/// - The title defaults to `"Untitled event"`. Description and location are
-///   set only when present.
+/// - The title defaults to `"Untitled event"`.
 /// - The UID is `timetree-<id>`, so re-imports update existing entries
 ///   instead of duplicating them.
-fn to_ics_event(source_event: &EventPayload) -> Option<Event> {
+fn parse_event(source_event: &EventPayload) -> Option<CalendarEvent> {
     let start = parse_datetime_value(first_value(source_event, START_KEYS))?;
 
     let mut location = first_value(source_event, LOCATION_KEYS);
     if let Some(Value::Object(place)) = location {
         location = first_value(place, &["name", "title", "address"]);
     }
-    let title = first_value(source_event, TITLE_KEYS)
-        .filter(|v| is_truthy(v))
-        .map_or("Untitled event".into(), py_str);
+    let text = |value: Option<&Value>| value.filter(|v| is_truthy(v)).map(py_str);
 
-    let mut event = Event::new();
-    event.summary(&title);
-    if let Some(description) = first_value(source_event, DESCRIPTION_KEYS).filter(|v| is_truthy(v))
-    {
-        event.description(&py_str(description));
-    }
-    if let Some(location) = location.filter(|v| is_truthy(v)) {
-        event.location(&py_str(location));
-    }
-    if let Some(uid) = first_value(source_event, UID_KEYS).filter(|v| is_truthy(v)) {
-        event.uid(&format!("timetree-{}", py_str(uid)));
-    }
-    set_event_times(
-        &mut event,
-        start,
-        parse_datetime_value(first_value(source_event, END_KEYS)),
-        first_value(source_event, ALL_DAY_KEYS).is_some_and(parse_bool_value),
-    );
-    Some(event.done())
+    Some(CalendarEvent {
+        title: text(first_value(source_event, TITLE_KEYS)).unwrap_or("Untitled event".into()),
+        description: text(first_value(source_event, DESCRIPTION_KEYS)),
+        location: text(location),
+        uid: text(first_value(source_event, UID_KEYS)).map(|id| format!("timetree-{id}")),
+        times: event_times(
+            start,
+            parse_datetime_value(first_value(source_event, END_KEYS)),
+            first_value(source_event, ALL_DAY_KEYS).is_some_and(parse_bool_value),
+        ),
+    })
 }
 
-/// Set the start and end of `event`.
+/// Work out when an event happens.
 ///
 /// An all-day event spans whole days up to its end date when that is later
 /// than the start date. Otherwise it lasts a single day. A timed event with no
 /// end, or with an end before its start, is given a one-hour duration.
-fn set_event_times(event: &mut Event, start: DateValue, end: Option<DateValue>, all_day: bool) {
+fn event_times(start: DateValue, end: Option<DateValue>, all_day: bool) -> EventTimes {
     match start {
         DateValue::DateTime(_) if !all_day => {
             let start = start.as_datetime();
@@ -158,7 +287,7 @@ fn set_event_times(event: &mut Event, start: DateValue, end: Option<DateValue>, 
                 .map(DateValue::as_datetime)
                 .filter(|end| *end >= start)
                 .unwrap_or(start + TimeDelta::hours(1));
-            event.starts(start).ends(end);
+            EventTimes::Timed { start, end }
         }
         _ => {
             let start = start.date_part();
@@ -166,7 +295,7 @@ fn set_event_times(event: &mut Event, start: DateValue, end: Option<DateValue>, 
                 .map(DateValue::date_part)
                 .filter(|end| *end > start)
                 .unwrap_or(start + Days::new(1));
-            event.starts(start).ends(end);
+            EventTimes::AllDay { start, end }
         }
     }
 }
@@ -308,7 +437,7 @@ mod tests {
     }
 
     fn ics_lines(value: Value) -> Vec<String> {
-        let event = to_ics_event(&payload(value)).unwrap();
+        let event = to_ics_event(&parse_event(&payload(value)).unwrap());
         event.to_string().lines().map(str::to_owned).collect()
     }
 
@@ -463,12 +592,70 @@ mod tests {
 
     #[test]
     fn skips_events_without_start() {
-        assert!(to_ics_event(&payload(json!({"id": "x", "title": "No start"}))).is_none());
+        assert!(parse_event(&payload(json!({"id": "x", "title": "No start"}))).is_none());
         let ics = to_ics(&[
             payload(json!({"id": "x"})),
             payload(json!({"start_at": "2026-03-01"})),
         ]);
         assert_eq!(ics.matches("BEGIN:VEVENT").count(), 1);
+    }
+
+    fn csv_record(value: Value) -> [String; 8] {
+        to_csv_record(
+            &parse_event(&payload(value)).unwrap(),
+            Some(Tz::Asia__Tokyo),
+        )
+    }
+
+    #[test]
+    fn csv_timed_event_with_quoting() {
+        let csv = to_csv(
+            &[payload(json!({
+                "title": "Meeting",
+                "start_at": 1_772_359_200_000_i64,
+                "end_at": 1_772_366_400_000_i64,
+                "description": "Bring \"pens\", paper\r\nand snacks",
+                "location": "Tokyo",
+            }))],
+            Some(Tz::Asia__Tokyo),
+        );
+        assert_eq!(
+            csv,
+            "Subject,Start Date,Start Time,End Date,End Time,All Day Event,Description,Location\r\n\
+             Meeting,03/01/2026,7:00 PM,03/01/2026,9:00 PM,False,\
+             \"Bring \"\"pens\"\", paper\nand snacks\",Tokyo\r\n"
+        );
+    }
+
+    #[test]
+    fn csv_times_use_the_given_time_zone() {
+        // 15:30 UTC is 00:30 the next day in Tokyo.
+        let record = csv_record(json!({"start_at": "2026-03-01T15:30:00Z"}));
+        assert_eq!(
+            record[1..6],
+            ["03/02/2026", "12:30 AM", "03/02/2026", "1:30 AM", "False"]
+        );
+    }
+
+    #[test]
+    fn csv_all_day_end_date_is_inclusive() {
+        let record = csv_record(json!({"start_at": "2026-03-01", "end_at": "2026-03-04"}));
+        assert_eq!(record[1..6], ["03/01/2026", "", "03/03/2026", "", "True"]);
+
+        let record = csv_record(json!({"start_at": "2026-03-01T00:00:00+09:00", "all_day": true}));
+        assert_eq!(record[1..6], ["03/01/2026", "", "03/01/2026", "", "True"]);
+    }
+
+    #[test]
+    fn csv_skips_events_without_start() {
+        let csv = to_csv(
+            &[
+                payload(json!({"id": "x"})),
+                payload(json!({"start_at": "2026-03-01"})),
+            ],
+            None,
+        );
+        assert_eq!(csv.lines().count(), 2);
     }
 
     #[test]
