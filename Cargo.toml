@@ -1,0 +1,21 @@
+[package]
+name = "timetree-scraper-rust"
+version = "0.1.0"
+edition = "2024"
+description = "Scrape public TimeTree events into JSON or ICS."
+
+[[bin]]
+name = "extract-timetree"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = "0.4"
+chromiumoxide = "0.9"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+icalendar = "0.17"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+thiserror = "2"

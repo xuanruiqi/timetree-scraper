@@ -1,0 +1,26 @@
+# Rust build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Scraper output written to the repo root
+/*.ics
+/*.json
+
+# Environment and secrets
+.env
+.env.*
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude
