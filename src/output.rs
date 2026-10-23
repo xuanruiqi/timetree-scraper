@@ -1,7 +1,7 @@
 //! Write scraped events as JSON, iCalendar or Google Calendar CSV.
 
 mod csv;
-mod event;
+pub mod event;
 mod ics;
 mod json;
 mod util;
@@ -40,6 +40,6 @@ pub fn write_events(
 
 /// Build an event payload from a JSON object literal.
 #[cfg(test)]
-fn payload(value: Value) -> EventPayload {
+pub fn payload(value: Value) -> EventPayload {
     value.as_object().unwrap().clone()
 }

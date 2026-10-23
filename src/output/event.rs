@@ -1,4 +1,5 @@
-//! The calendar fields of a TimeTree event, shared by the ICS and CSV writers.
+//! The calendar fields of a TimeTree event, shared by the ICS and CSV writers
+//! and the Google Calendar sync.
 
 use chrono::{DateTime, Days, NaiveDate, TimeDelta, Utc};
 use serde_json::Value;
@@ -30,7 +31,7 @@ const UID_KEYS: &[&str] = &["id", "uuid", "uid"];
 
 /// When an event happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EventTimes {
+pub enum EventTimes {
     Timed {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
@@ -41,17 +42,17 @@ pub(super) enum EventTimes {
 
 /// The parts of a TimeTree event that calendar files keep.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CalendarEvent {
-    pub(super) title: String,
-    pub(super) description: Option<String>,
-    pub(super) location: Option<String>,
-    pub(super) uid: Option<String>,
-    pub(super) times: EventTimes,
+pub struct CalendarEvent {
+    pub title: String,
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub uid: Option<String>,
+    pub times: EventTimes,
 }
 
 /// Parse the events, skipping those with no parseable start time and
 /// printing a message for each.
-pub(super) fn parse_events(events: &[EventPayload]) -> Vec<CalendarEvent> {
+pub fn parse_events(events: &[EventPayload]) -> Vec<CalendarEvent> {
     events
         .iter()
         .filter_map(|source_event| {
@@ -75,7 +76,7 @@ pub(super) fn parse_events(events: &[EventPayload]) -> Vec<CalendarEvent> {
 /// - The title defaults to `"Untitled event"`.
 /// - The UID is `timetree-<id>`, so re-imports update existing entries
 ///   instead of duplicating them.
-pub(super) fn parse_event(source_event: &EventPayload) -> Option<CalendarEvent> {
+pub fn parse_event(source_event: &EventPayload) -> Option<CalendarEvent> {
     let start = parse_datetime_value(first_value(source_event, START_KEYS))?;
 
     let mut location = first_value(source_event, LOCATION_KEYS);

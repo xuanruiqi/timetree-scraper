@@ -1,4 +1,4 @@
-//! Errors raised while scraping and writing events.
+//! Errors raised while scraping, writing and syncing events.
 
 use std::io;
 use std::path::PathBuf;
@@ -60,6 +60,43 @@ pub enum ReadError {
     NotJson(#[from] serde_json::Error),
     #[error("response is not a JSON object")]
     NotObject,
+}
+
+/// Why signing in to Google, or a Google Calendar request, failed.
+#[derive(Debug, thiserror::Error)]
+pub enum GcalError {
+    #[error("could not find your home directory")]
+    NoHomeDir,
+    #[error(
+        "failed to read the Google OAuth client secret from {} \
+         (see \"Google Calendar sync\" in the README)",
+        path.display()
+    )]
+    ClientSecret {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to sign in to Google")]
+    Auth(#[from] yup_oauth2::Error),
+    #[error("failed to reach Google Calendar")]
+    Http(#[from] reqwest::Error),
+    #[error("Google Calendar returned {status}: {message}")]
+    Api {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+    #[error(
+        "you have no calendar named \"{name}\" that you can edit; \
+         your editable calendars are: {}",
+        available.join(", ")
+    )]
+    CalendarNotFound {
+        name: String,
+        available: Vec<String>,
+    },
+    #[error("{count} of your calendars are named \"{name}\"; rename one of them")]
+    AmbiguousCalendar { name: String, count: usize },
 }
 
 /// Why the events could not be written.

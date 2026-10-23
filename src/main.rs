@@ -1,30 +1,38 @@
-//! Scrape public TimeTree events into JSON, ICS or Google Calendar CSV.
+//! Scrape public TimeTree events into JSON, ICS or Google Calendar CSV, or
+//! sync them into a Google Calendar.
 
 mod error;
+mod gcal;
 mod output;
 mod scrape;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono_tz::Tz;
 use clap::{Parser, ValueEnum};
 
-/// Scrape public TimeTree events into JSON, ICS or Google Calendar CSV.
+/// Scrape public TimeTree events into JSON, ICS or Google Calendar CSV, or
+/// sync them into a Google Calendar.
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
     /// Public TimeTree calendar URL to scrape.
     url: String,
-    /// Output file path.
-    output_file: PathBuf,
+    /// Output file path. May be omitted when syncing with `--gcal`.
+    #[arg(required_unless_present = "gcal")]
+    output_file: Option<PathBuf>,
     /// Output format. Defaults to the output file extension, then JSON.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, requires = "output_file")]
     format: Option<OutputFormat>,
     /// Time zone for the times in CSV output, as an IANA name such as
     /// `Asia/Tokyo`. Defaults to the system time zone.
     #[arg(long, value_parser = parse_timezone)]
     timezone: Option<Tz>,
+    /// Sync the events into the Google Calendar with this name, signing in
+    /// to Google first if needed.
+    #[arg(long, value_name = "CALENDAR_NAME")]
+    gcal: Option<String>,
 }
 
 fn parse_timezone(name: &str) -> Result<Tz, String> {
@@ -72,17 +80,39 @@ fn output_format(output_file: &std::path::Path, requested: Option<OutputFormat>)
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let file_format = output_format(&args.output_file, args.format);
+    // Sign in and find the calendar before scraping, which takes a while,
+    // so that a problem with either is reported straight away.
+    let calendar = match &args.gcal {
+        Some(name) => Some(gcal::GoogleCalendar::connect(name).await?),
+        None => None,
+    };
 
     let events = scrape::scrape(&args.url).await?;
-    output::write_events(&args.output_file, &events, file_format, args.timezone)?;
-
     println!("Total events scraped: {}", events.len());
-    println!(
-        "Wrote {} output to {}",
-        file_format.name(),
-        args.output_file.display()
-    );
+
+    if let Some(output_file) = &args.output_file {
+        let file_format = output_format(output_file, args.format);
+        output::write_events(output_file, &events, file_format, args.timezone)?;
+        println!(
+            "Wrote {} output to {}",
+            file_format.name(),
+            output_file.display()
+        );
+    }
+
+    if let (Some(calendar), Some(name)) = (calendar, &args.gcal) {
+        let summary = calendar.sync(&events).await;
+        println!(
+            "Synced to Google Calendar \"{name}\": {} created, {} updated",
+            summary.created, summary.updated
+        );
+        if summary.failed > 0 {
+            bail!(
+                "{} events failed to sync to Google Calendar",
+                summary.failed
+            );
+        }
+    }
     Ok(())
 }
 
