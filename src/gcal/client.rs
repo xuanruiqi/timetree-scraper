@@ -1,42 +1,39 @@
-//! A minimal Google Calendar API v3 client.
+//! The Google Calendar API calls a sync makes, through `google-calendar3`.
 
 use std::collections::HashMap;
+use std::error::Error as StdError;
+use std::future::Future;
 use std::hash::{BuildHasher, RandomState};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, SecondsFormat, Utc};
-use reqwest::{Method, StatusCode, Url};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use chrono::{DateTime, Utc};
+use google_calendar3::api::{Calendar, CalendarListEntry, Event};
+use google_calendar3::common::{GetToken, Response, Retry};
+use google_calendar3::hyper::StatusCode;
+use google_calendar3::hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use google_calendar3::hyper_util::client::legacy::Client as HyperClient;
+use google_calendar3::hyper_util::client::legacy::connect::HttpConnector;
+use google_calendar3::hyper_util::rt::TokioExecutor;
+use google_calendar3::{CalendarHub, Delegate};
+use serde_json::Value;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
 use yup_oauth2::authenticator::DefaultAuthenticator;
 
 use super::auth::SCOPES;
 use crate::error::GcalError;
 
-const API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 /// How many times to retry a request that was rate limited or hit a server
 /// error, doubling the wait each time. The waits add up to over a minute,
 /// since Google measures its per-user rate limit over a sliding minute.
 const MAX_RETRIES: u32 = 6;
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// The most events a page of an events list can hold.
-const MAX_EVENTS_PER_PAGE: &str = "2500";
+const MAX_EVENTS_PER_PAGE: i32 = 2500;
 /// The event fields that [`super::event::is_unchanged`] compares.
 const EVENT_LIST_FIELDS: &str =
     "items(id,status,summary,description,location,start,end),nextPageToken";
-
-/// An entry in the user's calendar list.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct CalendarListEntry {
-    pub(super) id: String,
-    #[serde(default)]
-    pub(super) summary: String,
-    /// The name the user gave the calendar in their own list, if any.
-    pub(super) summary_override: Option<String>,
-}
 
 /// Whether [`Client::write_event`] created or updated the event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,45 +43,81 @@ pub(super) enum Upsert {
 }
 
 pub(super) struct Client {
-    http: reqwest::Client,
-    auth: DefaultAuthenticator,
-    /// Held while getting an access token, so that when it must be
-    /// refreshed, or the user must sign in again, concurrent requests wait
-    /// for that to happen once instead of each doing it.
-    token_lock: Mutex<()>,
+    hub: CalendarHub<HttpsConnector<HttpConnector>>,
+    tokens: TokenSource,
 }
 
 impl Client {
-    pub(super) fn new(auth: DefaultAuthenticator) -> Self {
-        Self {
-            http: reqwest::Client::new(),
+    pub(super) fn new(auth: DefaultAuthenticator) -> Result<Self, GcalError> {
+        let connector = HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|e| GcalError::Request(Box::new(e.into())))?
+            .https_only()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        let client = HyperClient::builder(TokioExecutor::new()).build(connector);
+        let tokens = TokenSource {
             auth,
-            token_lock: Mutex::new(()),
-        }
+            lock: Arc::default(),
+        };
+        Ok(Self {
+            hub: CalendarHub::new(client, tokens.clone()),
+            tokens,
+        })
+    }
+
+    /// Get a new access token, for when Google rejects the cached one
+    /// although it has not expired, for example because the user revoked
+    /// access. Signs the user in again if the token cannot be refreshed.
+    pub(super) async fn refresh_token(&self) -> Result<(), GcalError> {
+        let _guard = self.tokens.lock.lock().await;
+        self.tokens.auth.force_refreshed_token(SCOPES).await?;
+        Ok(())
     }
 
     /// The calendars in the user's list that they can add events to.
     pub(super) async fn writable_calendars(&self) -> Result<Vec<CalendarListEntry>, GcalError> {
-        let mut url = api_url(&["users", "me", "calendarList"]);
-        url.query_pairs_mut().append_pair("minAccessRole", "writer");
-        self.list_all(url)
-            .await?
-            .into_iter()
-            .map(serde_json::from_value)
-            .collect::<Result<_, _>>()
-            .map_err(|e| api_error(StatusCode::OK, &format!("unexpected calendar list: {e}")))
+        let mut calendars = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut call = self.hub.calendar_list().list().min_access_role("writer");
+            if let Some(token) = &page_token {
+                call = call.page_token(token);
+            }
+            let (_, page) = call
+                .add_scopes(SCOPES)
+                .delegate(&mut Backoff::default())
+                .doit()
+                .await
+                .map_err(api_error)?;
+            calendars.extend(page.items.unwrap_or_default());
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                return Ok(calendars);
+            }
+        }
     }
 
     /// Create a calendar named `name` and return its ID.
     pub(super) async fn create_calendar(&self, name: &str) -> Result<String, GcalError> {
-        let url = api_url(&["calendars"]);
-        let calendar = self
-            .call(Method::POST, url, Some(&json!({"summary": name})))
-            .await?;
-        calendar["id"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| api_error(StatusCode::OK, "created calendar has no ID"))
+        let calendar = Calendar {
+            summary: Some(name.to_owned()),
+            ..Default::default()
+        };
+        let (_, calendar) = self
+            .hub
+            .calendars()
+            .insert(calendar)
+            .add_scopes(SCOPES)
+            .delegate(&mut Backoff::default())
+            .doit()
+            .await
+            .map_err(api_error)?;
+        calendar.id.ok_or_else(|| GcalError::Api {
+            status: StatusCode::OK,
+            message: "created calendar has no ID".to_owned(),
+        })
     }
 
     /// The calendar's events, including deleted ones, by ID, with only the
@@ -94,22 +127,37 @@ impl Client {
         &self,
         calendar_id: &str,
         time_min: DateTime<Utc>,
-    ) -> Result<HashMap<String, Value>, GcalError> {
-        let mut url = api_url(&["calendars", calendar_id, "events"]);
-        url.query_pairs_mut()
-            .append_pair("showDeleted", "true")
-            .append_pair("maxResults", MAX_EVENTS_PER_PAGE)
-            .append_pair(
-                "timeMin",
-                &time_min.to_rfc3339_opts(SecondsFormat::Secs, true),
-            )
-            .append_pair("fields", EVENT_LIST_FIELDS);
-        Ok(self
-            .list_all(url)
-            .await?
-            .into_iter()
-            .filter_map(|event| Some((event["id"].as_str()?.to_owned(), event)))
-            .collect())
+    ) -> Result<HashMap<String, Event>, GcalError> {
+        let mut events = HashMap::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut call = self
+                .hub
+                .events()
+                .list(calendar_id)
+                .show_deleted(true)
+                .max_results(MAX_EVENTS_PER_PAGE)
+                .time_min(time_min)
+                .param("fields", EVENT_LIST_FIELDS);
+            if let Some(token) = &page_token {
+                call = call.page_token(token);
+            }
+            let (_, page) = call
+                .add_scopes(SCOPES)
+                .delegate(&mut Backoff::default())
+                .doit()
+                .await
+                .map_err(api_error)?;
+            for event in page.items.unwrap_or_default() {
+                if let Some(id) = event.id.clone() {
+                    events.insert(id, event);
+                }
+            }
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                return Ok(events);
+            }
+        }
     }
 
     /// Write the event with ID `event_id`, replacing it if `exists` and
@@ -122,7 +170,7 @@ impl Client {
         &self,
         calendar_id: &str,
         event_id: &str,
-        event: &Value,
+        event: &Event,
         exists: bool,
     ) -> Result<Upsert, GcalError> {
         let written = if exists {
@@ -140,11 +188,9 @@ impl Client {
                 .await?
                 .then_some(Upsert::Updated)
         };
-        written.ok_or_else(|| {
-            api_error(
-                StatusCode::CONFLICT,
-                "the event could be neither created nor updated",
-            )
+        written.ok_or_else(|| GcalError::Api {
+            status: StatusCode::CONFLICT,
+            message: "the event could be neither created nor updated".to_owned(),
         })
     }
 
@@ -152,10 +198,16 @@ impl Client {
     pub(super) async fn insert_event(
         &self,
         calendar_id: &str,
-        event: &Value,
+        event: &Event,
     ) -> Result<(), GcalError> {
-        let url = api_url(&["calendars", calendar_id, "events"]);
-        self.call(Method::POST, url, Some(event)).await?;
+        self.hub
+            .events()
+            .insert(event.clone(), calendar_id)
+            .add_scopes(SCOPES)
+            .delegate(&mut Backoff::default())
+            .doit()
+            .await
+            .map_err(api_error)?;
         Ok(())
     }
 
@@ -165,14 +217,17 @@ impl Client {
         &self,
         calendar_id: &str,
         event_id: &str,
-        event: &Value,
+        event: &Event,
     ) -> Result<bool, GcalError> {
-        let url = api_url(&["calendars", calendar_id, "events", event_id]);
-        match self.send(Method::PUT, url, Some(event)).await? {
-            (status, _) if status.is_success() => Ok(true),
-            (StatusCode::NOT_FOUND, _) => Ok(false),
-            (status, body) => Err(error_from_response(status, &body)),
-        }
+        let result = self
+            .hub
+            .events()
+            .update(event.clone(), calendar_id, event_id)
+            .add_scopes(SCOPES)
+            .delegate(&mut Backoff::default())
+            .doit()
+            .await;
+        succeeded_unless(result, StatusCode::NOT_FOUND)
     }
 
     /// Create an event with ID `event_id`. Returns `false` if an event with
@@ -181,116 +236,66 @@ impl Client {
         &self,
         calendar_id: &str,
         event_id: &str,
-        event: &Value,
+        event: &Event,
     ) -> Result<bool, GcalError> {
-        let url = api_url(&["calendars", calendar_id, "events"]);
-        let mut event = event.clone();
-        event["id"] = event_id.into();
-        match self.send(Method::POST, url, Some(&event)).await? {
-            (status, _) if status.is_success() => Ok(true),
-            (StatusCode::CONFLICT, _) => Ok(false),
-            (status, body) => Err(error_from_response(status, &body)),
-        }
-    }
-
-    /// GET every page of a list and return the items on all of them.
-    async fn list_all(&self, url: Url) -> Result<Vec<Value>, GcalError> {
-        let mut items = Vec::new();
-        let mut page_token: Option<String> = None;
-        loop {
-            let mut page_url = url.clone();
-            if let Some(token) = &page_token {
-                page_url.query_pairs_mut().append_pair("pageToken", token);
-            }
-            let mut page = self.call(Method::GET, page_url, None).await?;
-            if let Value::Array(page_items) = page["items"].take() {
-                items.extend(page_items);
-            }
-            page_token = page["nextPageToken"].as_str().map(str::to_owned);
-            if page_token.is_none() {
-                return Ok(items);
-            }
-        }
-    }
-
-    /// Send a request and return its JSON response, or an error if it did
-    /// not succeed.
-    async fn call(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&Value>,
-    ) -> Result<Value, GcalError> {
-        match self.send(method, url, body).await? {
-            (status, body) if status.is_success() => Ok(body),
-            (status, body) => Err(error_from_response(status, &body)),
-        }
-    }
-
-    /// Send a request, retrying with exponential backoff while it is rate
-    /// limited or hits a server error, and return its status and JSON body
-    /// (`null` if the body is not JSON).
-    ///
-    /// If the access token is rejected, it is refreshed, or the user is asked
-    /// to sign in again if that fails, and the request is retried once.
-    async fn send(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&Value>,
-    ) -> Result<(StatusCode, Value), GcalError> {
-        let mut delay = FIRST_RETRY_DELAY;
-        let mut retries = 0;
-        let mut rejected_token = None;
-        loop {
-            let token = self.access_token(rejected_token.as_deref()).await?;
-            let mut request = self
-                .http
-                .request(method.clone(), url.clone())
-                .bearer_auth(&token);
-            if let Some(body) = body {
-                request = request.json(body);
-            }
-            let response = request.send().await?;
-            let status = response.status();
-            let body = response.json().await.unwrap_or(Value::Null);
-            // A cached token that has not expired can still be invalid, for
-            // example if the user revoked access.
-            if status == StatusCode::UNAUTHORIZED && rejected_token.is_none() {
-                rejected_token = Some(token);
-                continue;
-            }
-            if retries == MAX_RETRIES || !is_retryable(status, &body) {
-                return Ok((status, body));
-            }
-            sleep(delay + jitter()).await;
-            delay *= 2;
-            retries += 1;
-        }
-    }
-
-    /// A current access token. If `rejected` is the cached token, a new one
-    /// is fetched, unless a concurrent request already replaced it.
-    async fn access_token(&self, rejected: Option<&str>) -> Result<String, GcalError> {
-        let _guard = self.token_lock.lock().await;
-        let mut token = self.auth.token(SCOPES).await?;
-        if rejected.is_some() && token.token() == rejected {
-            token = self.auth.force_refreshed_token(SCOPES).await?;
-        }
-        Ok(token
-            .token()
-            .ok_or(yup_oauth2::Error::MissingAccessToken)?
-            .to_owned())
+        let event = Event {
+            id: Some(event_id.to_owned()),
+            ..event.clone()
+        };
+        let result = self
+            .hub
+            .events()
+            .insert(event, calendar_id)
+            .add_scopes(SCOPES)
+            .delegate(&mut Backoff::default())
+            .doit()
+            .await;
+        succeeded_unless(result, StatusCode::CONFLICT)
     }
 }
 
-/// The URL of an API resource, percent-encoding each path segment.
-fn api_url(segments: &[&str]) -> Url {
-    let mut url = Url::parse(API_BASE).expect("API_BASE is a valid URL");
-    url.path_segments_mut()
-        .expect("API_BASE has a path")
-        .extend(segments);
-    url
+/// Hands the hub its access tokens one request at a time, so that when the
+/// token must be refreshed, or the user must sign in again, concurrent
+/// requests wait for that to happen once instead of each doing it.
+#[derive(Clone)]
+struct TokenSource {
+    auth: DefaultAuthenticator,
+    lock: Arc<Mutex<()>>,
+}
+
+type TokenResult = Result<Option<String>, Box<dyn StdError + Send + Sync>>;
+
+impl GetToken for TokenSource {
+    fn get_token<'a>(
+        &'a self,
+        scopes: &'a [&str],
+    ) -> Pin<Box<dyn Future<Output = TokenResult> + Send + 'a>> {
+        Box::pin(async move {
+            let _guard = self.lock.lock().await;
+            let token = self.auth.token(scopes).await?;
+            Ok(token.token().map(str::to_owned))
+        })
+    }
+}
+
+/// Retries requests that were rate limited or hit a server error, with
+/// exponential backoff. Each request needs its own.
+#[derive(Default)]
+struct Backoff {
+    retries: u32,
+}
+
+impl Delegate for Backoff {
+    fn http_failure(&mut self, response: &Response, body: Option<&Value>) -> Retry {
+        if self.retries == MAX_RETRIES
+            || !is_retryable(response.status(), body.unwrap_or(&Value::Null))
+        {
+            return Retry::Abort;
+        }
+        let delay = FIRST_RETRY_DELAY * 2u32.pow(self.retries) + jitter();
+        self.retries += 1;
+        Retry::After(delay)
+    }
 }
 
 /// Whether a failed request may succeed if sent again: it was rate limited
@@ -318,34 +323,48 @@ fn jitter() -> Duration {
     Duration::from_millis(RandomState::new().hash_one(()) % 1000)
 }
 
-/// Turn an error response into a [`GcalError::Api`], using the message
-/// Google sends in its body when there is one.
-fn error_from_response(status: StatusCode, body: &Value) -> GcalError {
-    let message = body["error"]["message"]
-        .as_str()
-        .unwrap_or("no error message");
-    api_error(status, message)
+/// `Ok(true)` if the request succeeded, or `Ok(false)` if it failed with
+/// status `expected_failure`.
+fn succeeded_unless<T>(
+    result: google_calendar3::Result<T>,
+    expected_failure: StatusCode,
+) -> Result<bool, GcalError> {
+    match result.map_err(api_error) {
+        Ok(_) => Ok(true),
+        Err(GcalError::Api { status, .. }) if status == expected_failure => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
-fn api_error(status: StatusCode, message: &str) -> GcalError {
-    GcalError::Api {
-        status,
-        message: message.to_owned(),
+/// Turn a failed request into a [`GcalError`]: [`GcalError::Api`], with
+/// the status and message from Google's error body, if Google responded.
+fn api_error(error: google_calendar3::Error) -> GcalError {
+    match error {
+        google_calendar3::Error::BadRequest(body) => {
+            let error = &body["error"];
+            GcalError::Api {
+                status: error["code"]
+                    .as_u64()
+                    .and_then(|code| StatusCode::from_u16(code.try_into().ok()?).ok())
+                    .unwrap_or(StatusCode::BAD_REQUEST),
+                message: error["message"]
+                    .as_str()
+                    .unwrap_or("no error message")
+                    .to_owned(),
+            }
+        }
+        google_calendar3::Error::Failure(response) => GcalError::Api {
+            status: response.status(),
+            message: "no error message".to_owned(),
+        },
+        error => GcalError::Request(Box::new(error)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn api_url_encodes_segments() {
-        let url = api_url(&["calendars", "a#b@group.calendar.google.com", "events"]);
-        assert_eq!(
-            url.as_str(),
-            "https://www.googleapis.com/calendar/v3/calendars/a%23b@group.calendar.google.com/events"
-        );
-    }
+    use serde_json::json;
 
     #[test]
     fn retries_rate_limits_and_server_errors() {
@@ -365,5 +384,22 @@ mod tests {
             .map(|n| FIRST_RETRY_DELAY * 2u32.pow(n))
             .sum();
         assert!(total > Duration::from_secs(60), "{total:?}");
+    }
+
+    #[test]
+    fn errors_take_status_and_message_from_google() {
+        let body =
+            json!({"error": {"code": 409, "message": "The requested identifier already exists."}});
+        match api_error(google_calendar3::Error::BadRequest(body)) {
+            GcalError::Api { status, message } => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(message, "The requested identifier already exists.");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let result: google_calendar3::Result<()> = Err(google_calendar3::Error::BadRequest(
+            json!({"error": {"code": 404, "message": "Not Found"}}),
+        ));
+        assert!(!succeeded_unless(result, StatusCode::NOT_FOUND).unwrap());
     }
 }

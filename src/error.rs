@@ -82,10 +82,10 @@ pub enum GcalError {
     #[error("failed to sign in to Google")]
     Auth(#[from] yup_oauth2::Error),
     #[error("failed to reach Google Calendar")]
-    Http(#[from] reqwest::Error),
+    Request(#[source] Box<google_calendar3::Error>),
     #[error("Google Calendar returned {status}: {message}")]
     Api {
-        status: reqwest::StatusCode,
+        status: google_calendar3::hyper::StatusCode,
         message: String,
     },
     #[error("{count} of your calendars are named \"{name}\"; rename one of them")]

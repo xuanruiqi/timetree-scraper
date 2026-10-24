@@ -1,7 +1,6 @@
 //! Google Calendar API event resources.
 
-use chrono::{DateTime, SecondsFormat};
-use serde_json::{Value, json};
+use google_calendar3::api::{Event, EventDateTime};
 
 use crate::output::event::{CalendarEvent, EventTimes};
 
@@ -21,62 +20,59 @@ pub(super) fn event_id(uid: &str) -> Option<String> {
 
 /// Convert an event to a Google Calendar event resource.
 ///
-/// Every field is written, absent ones as `null`, so that an update clears
-/// fields removed in TimeTree. The status is always `confirmed`, so that an
-/// update restores an event that was deleted in Google Calendar.
-pub(super) fn to_gcal_event(event: &CalendarEvent) -> Value {
+/// An update replaces the whole event, so fields left out here, including
+/// ones removed in TimeTree, are cleared. The status is always `confirmed`,
+/// so that an update restores an event that was deleted in Google Calendar.
+pub(super) fn to_gcal_event(event: &CalendarEvent) -> Event {
     let (start, end) = match event.times {
         EventTimes::Timed { start, end } => (
-            json!({"dateTime": start.to_rfc3339_opts(SecondsFormat::AutoSi, true)}),
-            json!({"dateTime": end.to_rfc3339_opts(SecondsFormat::AutoSi, true)}),
+            EventDateTime {
+                date_time: Some(start),
+                ..Default::default()
+            },
+            EventDateTime {
+                date_time: Some(end),
+                ..Default::default()
+            },
         ),
         EventTimes::AllDay { start, end } => (
-            json!({"date": start.to_string()}),
-            json!({"date": end.to_string()}),
+            EventDateTime {
+                date: Some(start),
+                ..Default::default()
+            },
+            EventDateTime {
+                date: Some(end),
+                ..Default::default()
+            },
         ),
     };
-    json!({
-        "summary": event.title,
-        "description": event.description,
-        "location": event.location,
-        "start": start,
-        "end": end,
-        "status": "confirmed",
-    })
+    Event {
+        summary: Some(event.title.clone()),
+        description: event.description.clone(),
+        location: event.location.clone(),
+        start: Some(start),
+        end: Some(end),
+        status: Some("confirmed".to_owned()),
+        ..Default::default()
+    }
 }
 
 /// Whether `existing`, an event as Google lists it, already matches
 /// `event`, a resource from [`to_gcal_event`], so writing it would change
 /// nothing.
 ///
-/// Google leaves out empty text fields, and gives times in the calendar's
-/// time zone, so text is compared treating missing and empty alike, and
-/// times are compared as instants.
-pub(super) fn is_unchanged(existing: &Value, event: &Value) -> bool {
-    existing["status"] == event["status"]
-        && ["summary", "description", "location"]
-            .iter()
-            .all(|field| text(&existing[field]) == text(&event[field]))
-        && same_time(&existing["start"], &event["start"])
-        && same_time(&existing["end"], &event["end"])
-}
-
-fn text(value: &Value) -> Option<&str> {
-    value.as_str().filter(|text| !text.is_empty())
-}
-
-/// Whether two event times are the same date, or the same instant.
-fn same_time(a: &Value, b: &Value) -> bool {
-    let instant = |time: &Value| {
-        time["dateTime"]
-            .as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-    };
-    match (a["date"].as_str(), b["date"].as_str()) {
-        (Some(a), Some(b)) => a == b,
-        (None, None) => instant(a).is_some() && instant(a) == instant(b),
-        _ => false,
-    }
+/// Google leaves out empty text fields, so missing and empty text count as
+/// the same. Times are compared as dates or instants, ignoring the time
+/// zone Google lists them in.
+pub(super) fn is_unchanged(existing: &Event, event: &Event) -> bool {
+    let text = |value: &Option<String>| value.clone().filter(|text| !text.is_empty());
+    let time = |time: &Option<EventDateTime>| time.as_ref().map(|time| (time.date, time.date_time));
+    existing.status == event.status
+        && text(&existing.summary) == text(&event.summary)
+        && text(&existing.description) == text(&event.description)
+        && text(&existing.location) == text(&event.location)
+        && time(&existing.start) == time(&event.start)
+        && time(&existing.end) == time(&event.end)
 }
 
 #[cfg(test)]
@@ -84,9 +80,23 @@ mod tests {
     use super::*;
     use crate::output::event::parse_event;
     use crate::output::payload;
+    use google_calendar3::common::remove_json_null_values;
+    use serde_json::{Value, json};
 
-    fn gcal_event(value: Value) -> Value {
+    fn gcal_event(value: Value) -> Event {
         to_gcal_event(&parse_event(&payload(value)).unwrap())
+    }
+
+    /// The JSON body sent for an event, from which nulls are removed.
+    fn request_body(event: &Event) -> Value {
+        let mut body = serde_json::to_value(event).unwrap();
+        remove_json_null_values(&mut body);
+        body
+    }
+
+    /// An event as Google lists it.
+    fn listed(value: Value) -> Event {
+        serde_json::from_value(value).unwrap()
     }
 
     #[test]
@@ -99,7 +109,7 @@ mod tests {
             "location": "Tokyo",
         }));
         assert_eq!(
-            event,
+            request_body(&event),
             json!({
                 "summary": "Meeting",
                 "description": "Notes",
@@ -114,10 +124,15 @@ mod tests {
     #[test]
     fn all_day_event_end_is_exclusive() {
         let event = gcal_event(json!({"start_at": "2026-03-01", "end_at": "2026-03-04"}));
-        assert_eq!(event["start"], json!({"date": "2026-03-01"}));
-        assert_eq!(event["end"], json!({"date": "2026-03-04"}));
-        assert_eq!(event["description"], Value::Null);
-        assert_eq!(event["location"], Value::Null);
+        assert_eq!(
+            request_body(&event),
+            json!({
+                "summary": "Untitled event",
+                "start": {"date": "2026-03-01"},
+                "end": {"date": "2026-03-04"},
+                "status": "confirmed",
+            })
+        );
     }
 
     #[test]
@@ -128,7 +143,7 @@ mod tests {
             "end_at": "2026-03-01T12:00:00Z",
             "location": "Tokyo",
         }));
-        let listed = json!({
+        let same = json!({
             "id": "abc",
             "status": "confirmed",
             "summary": "Meeting",
@@ -136,34 +151,34 @@ mod tests {
             "start": {"dateTime": "2026-03-01T19:00:00+09:00", "timeZone": "Asia/Tokyo"},
             "end": {"dateTime": "2026-03-01T21:00:00+09:00", "timeZone": "Asia/Tokyo"},
         });
-        assert!(is_unchanged(&listed, &event));
+        assert!(is_unchanged(&listed(same.clone()), &event));
 
-        let mut moved = listed.clone();
+        let mut moved = same.clone();
         moved["end"]["dateTime"] = json!("2026-03-01T22:00:00+09:00");
-        assert!(!is_unchanged(&moved, &event));
+        assert!(!is_unchanged(&listed(moved), &event));
 
-        let mut described = listed.clone();
+        let mut described = same.clone();
         described["description"] = json!("Notes");
-        assert!(!is_unchanged(&described, &event));
+        assert!(!is_unchanged(&listed(described), &event));
 
         // Deleted events are listed with little more than their status.
         let deleted = json!({"id": "abc", "status": "cancelled"});
-        assert!(!is_unchanged(&deleted, &event));
+        assert!(!is_unchanged(&listed(deleted), &event));
     }
 
     #[test]
     fn all_day_and_timed_events_differ() {
         let all_day = gcal_event(json!({"start_at": "2026-03-01"}));
-        let listed = json!({
+        let same = listed(json!({
             "status": "confirmed",
             "summary": "Untitled event",
             "start": {"date": "2026-03-01"},
             "end": {"date": "2026-03-02"},
-        });
-        assert!(is_unchanged(&listed, &all_day));
+        }));
+        assert!(is_unchanged(&same, &all_day));
 
         let timed = gcal_event(json!({"start_at": "2026-03-01T00:00:00Z"}));
-        assert!(!is_unchanged(&listed, &timed));
+        assert!(!is_unchanged(&same, &timed));
     }
 
     #[test]

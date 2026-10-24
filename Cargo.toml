@@ -21,6 +21,5 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 thiserror = "2"
 yup-oauth2 = { version = "12", default-features = false, features = ["hyper-rustls", "aws-lc-rs"] }
-reqwest = { version = "0.13", features = ["json"] }
-serde = { version = "1", features = ["derive"] }
 open = "5"
+google-calendar3 = { version = "7", default-features = false, features = ["yup-oauth2", "aws-lc-rs"] }

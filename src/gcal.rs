@@ -8,12 +8,13 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveTime, TimeDelta, Utc};
 use futures::{StreamExt, stream};
-use serde_json::Value;
+use google_calendar3::api::{CalendarListEntry, Event};
+use google_calendar3::hyper::StatusCode;
 
 use crate::error::GcalError;
 use crate::output::EventPayload;
 use crate::output::event::{CalendarEvent, EventTimes, parse_events};
-use client::{CalendarListEntry, Client, Upsert};
+use client::{Client, Upsert};
 use event::{event_id, is_unchanged, to_gcal_event};
 
 /// How many events to write at once. Google allows each user 600 requests
@@ -42,8 +43,21 @@ impl GoogleCalendar {
     /// calendar named `name` among those the user can edit, creating it if
     /// there is none.
     pub async fn connect(name: &str) -> Result<Self, GcalError> {
-        let client = Client::new(auth::authenticate().await?);
-        let id = match find_calendar(client.writable_calendars().await?, name)? {
+        let client = Client::new(auth::authenticate().await?)?;
+        let calendars = match client.writable_calendars().await {
+            // The cached token may have been revoked before it expired.
+            // Later requests are not retried this way, since a token is
+            // unlikely to be revoked in the minute or so a sync takes.
+            Err(GcalError::Api {
+                status: StatusCode::UNAUTHORIZED,
+                ..
+            }) => {
+                client.refresh_token().await?;
+                client.writable_calendars().await?
+            }
+            result => result?,
+        };
+        let id = match find_calendar(calendars, name)? {
             Some(id) => id,
             None => {
                 let id = client.create_calendar(name).await?;
@@ -106,7 +120,7 @@ impl GoogleCalendar {
     async fn sync_event(
         &self,
         event: &CalendarEvent,
-        existing: &HashMap<String, Value>,
+        existing: &HashMap<String, Event>,
     ) -> Result<Option<Upsert>, GcalError> {
         let resource = to_gcal_event(event);
         let Some(event_id) = event.uid.as_deref().and_then(event_id) else {
@@ -152,15 +166,15 @@ fn find_calendar(
         calendar
             .summary_override
             .clone()
-            .unwrap_or_else(|| calendar.summary.clone())
+            .or_else(|| calendar.summary.clone())
     };
     let mut matches: Vec<_> = calendars
-        .iter()
-        .filter(|calendar| display_name(calendar) == name)
+        .into_iter()
+        .filter(|calendar| display_name(calendar).as_deref() == Some(name))
         .collect();
     match matches.len() {
         0 => Ok(None),
-        1 => Ok(Some(matches.remove(0).id.clone())),
+        1 => Ok(matches.remove(0).id),
         count => Err(GcalError::AmbiguousCalendar {
             name: name.to_owned(),
             count,
@@ -174,9 +188,10 @@ mod tests {
 
     fn calendar(id: &str, summary: &str, summary_override: Option<&str>) -> CalendarListEntry {
         CalendarListEntry {
-            id: id.to_owned(),
-            summary: summary.to_owned(),
+            id: Some(id.to_owned()),
+            summary: Some(summary.to_owned()),
             summary_override: summary_override.map(str::to_owned),
+            ..Default::default()
         }
     }
 
