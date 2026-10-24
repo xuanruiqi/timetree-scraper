@@ -1,5 +1,5 @@
 [package]
-name = "timetree-scraper-rust"
+name = "timetree-scraper"
 version = "0.1.0"
 edition = "2024"
 description = "Scrape public TimeTree events into JSON, ICS or Google Calendar CSV, or sync them into a Google Calendar."

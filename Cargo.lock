@@ -1880,7 +1880,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "timetree-scraper-rust"
+name = "timetree-scraper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
