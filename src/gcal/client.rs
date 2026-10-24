@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use reqwest::{Method, StatusCode, Url};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::time::sleep;
 use yup_oauth2::authenticator::DefaultAuthenticator;
 
@@ -76,6 +76,18 @@ impl Client {
                 return Ok(calendars);
             }
         }
+    }
+
+    /// Create a calendar named `name` and return its ID.
+    pub(super) async fn create_calendar(&self, name: &str) -> Result<String, GcalError> {
+        let url = api_url(&["calendars"]);
+        let calendar = self
+            .call(Method::POST, url, Some(&json!({"summary": name})))
+            .await?;
+        calendar["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| api_error(StatusCode::OK, "created calendar has no ID"))
     }
 
     /// Replace the event with ID `event_id`, or create it with that ID if it
@@ -220,7 +232,6 @@ fn api_error(status: StatusCode, message: &str) -> GcalError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn api_url_encodes_segments() {

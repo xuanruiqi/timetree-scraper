@@ -12,9 +12,11 @@ use yup_oauth2::{ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowRet
 
 use crate::error::GcalError;
 
-/// Access needed to find a calendar by name and write its events.
+/// Access needed to find a calendar by name, create it if there is none, and
+/// write its events.
 pub(super) const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    "https://www.googleapis.com/auth/calendar.app.created",
     "https://www.googleapis.com/auth/calendar.events",
 ];
 

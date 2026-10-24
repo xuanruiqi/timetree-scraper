@@ -88,15 +88,6 @@ pub enum GcalError {
         status: reqwest::StatusCode,
         message: String,
     },
-    #[error(
-        "you have no calendar named \"{name}\" that you can edit; \
-         your editable calendars are: {}",
-        available.join(", ")
-    )]
-    CalendarNotFound {
-        name: String,
-        available: Vec<String>,
-    },
     #[error("{count} of your calendars are named \"{name}\"; rename one of them")]
     AmbiguousCalendar { name: String, count: usize },
 }

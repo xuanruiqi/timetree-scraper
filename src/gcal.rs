@@ -26,10 +26,18 @@ pub struct SyncSummary {
 
 impl GoogleCalendar {
     /// Sign in to Google, prompting the user if needed, and find the
-    /// calendar named `name` among those the user can edit.
+    /// calendar named `name` among those the user can edit, creating it if
+    /// there is none.
     pub async fn connect(name: &str) -> Result<Self, GcalError> {
         let client = Client::new(auth::authenticate().await?);
-        let id = find_calendar(client.writable_calendars().await?, name)?;
+        let id = match find_calendar(client.writable_calendars().await?, name)? {
+            Some(id) => id,
+            None => {
+                let id = client.create_calendar(name).await?;
+                println!("Created Google Calendar \"{name}\"");
+                id
+            }
+        };
         Ok(Self { client, id })
     }
 
@@ -71,9 +79,13 @@ impl GoogleCalendar {
     }
 }
 
-/// The ID of the calendar named `name`, matching the name the user sees:
-/// their own name for the calendar if they gave it one, otherwise its title.
-fn find_calendar(calendars: Vec<CalendarListEntry>, name: &str) -> Result<String, GcalError> {
+/// The ID of the calendar named `name`, or `None` if there is none, matching
+/// the name the user sees: their own name for the calendar if they gave it
+/// one, otherwise its title.
+fn find_calendar(
+    calendars: Vec<CalendarListEntry>,
+    name: &str,
+) -> Result<Option<String>, GcalError> {
     let display_name = |calendar: &CalendarListEntry| {
         calendar
             .summary_override
@@ -85,11 +97,8 @@ fn find_calendar(calendars: Vec<CalendarListEntry>, name: &str) -> Result<String
         .filter(|calendar| display_name(calendar) == name)
         .collect();
     match matches.len() {
-        1 => Ok(matches.remove(0).id.clone()),
-        0 => Err(GcalError::CalendarNotFound {
-            name: name.to_owned(),
-            available: calendars.iter().map(display_name).collect(),
-        }),
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0).id.clone())),
         count => Err(GcalError::AmbiguousCalendar {
             name: name.to_owned(),
             count,
@@ -120,18 +129,21 @@ mod tests {
 
     #[test]
     fn finds_calendar_by_display_name() {
-        assert_eq!(find_calendar(calendars(), "Work").unwrap(), "a");
-        assert_eq!(find_calendar(calendars(), "Family").unwrap(), "b");
+        assert_eq!(
+            find_calendar(calendars(), "Work").unwrap().as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            find_calendar(calendars(), "Family").unwrap().as_deref(),
+            Some("b")
+        );
     }
 
     #[test]
-    fn reports_missing_and_ambiguous_names() {
-        match find_calendar(calendars(), "Shared title") {
-            Err(GcalError::CalendarNotFound { available, .. }) => {
-                assert_eq!(available, ["Work", "Family", "Club", "Club"]);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
+    fn missing_and_ambiguous_names() {
+        // A title hidden behind the user's own name for the calendar does
+        // not match.
+        assert_eq!(find_calendar(calendars(), "Shared title").unwrap(), None);
         assert!(matches!(
             find_calendar(calendars(), "Club"),
             Err(GcalError::AmbiguousCalendar { count: 2, .. })
