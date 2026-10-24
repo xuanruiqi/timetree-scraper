@@ -68,11 +68,13 @@ pub enum GcalError {
     #[error("could not find your home directory")]
     NoHomeDir,
     #[error(
-        "failed to read the Google OAuth client secret from {} \
+        "set {} to the client ID and secret of a \"Desktop app\" Google OAuth client \
          (see \"Google Calendar sync\" in the README)",
-        path.display()
+        missing.join(" and ")
     )]
-    ClientSecret {
+    MissingClient { missing: Vec<&'static str> },
+    #[error("failed to create {}", path.display())]
+    ConfigDir {
         path: PathBuf,
         #[source]
         source: io::Error,

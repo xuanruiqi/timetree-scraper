@@ -129,6 +129,9 @@ impl Client {
     /// Send a request, retrying with exponential backoff while it is rate
     /// limited or hits a server error, and return its status and JSON body
     /// (`null` if the body is not JSON).
+    ///
+    /// If the access token is rejected, it is refreshed, or the user is asked
+    /// to sign in again if that fails, and the request is retried once.
     async fn send(
         &self,
         method: Method,
@@ -137,8 +140,13 @@ impl Client {
     ) -> Result<(StatusCode, Value), GcalError> {
         let mut delay = FIRST_RETRY_DELAY;
         let mut retries = 0;
+        let mut force_refresh = false;
         loop {
-            let token = self.auth.token(SCOPES).await?;
+            let token = if force_refresh {
+                self.auth.force_refreshed_token(SCOPES).await?
+            } else {
+                self.auth.token(SCOPES).await?
+            };
             let token = token.token().ok_or(yup_oauth2::Error::MissingAccessToken)?;
             let mut request = self
                 .http
@@ -150,6 +158,12 @@ impl Client {
             let response = request.send().await?;
             let status = response.status();
             let body = response.json().await.unwrap_or(Value::Null);
+            // A cached token that has not expired can still be invalid, for
+            // example if the user revoked access.
+            if status == StatusCode::UNAUTHORIZED && !force_refresh {
+                force_refresh = true;
+                continue;
+            }
             if retries == MAX_RETRIES || !is_retryable(status, &body) {
                 return Ok((status, body));
             }

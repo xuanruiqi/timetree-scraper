@@ -109,23 +109,28 @@ The tool needs an OAuth client of your own. You only have to create it once:
 
 1. In the [Google Cloud console](https://console.cloud.google.com/), create a project and [enable the Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com) for it.
 2. Configure the [OAuth consent screen](https://console.cloud.google.com/auth/overview). Choose "External", and add your Google account as a test user.
-3. [Create an OAuth client ID](https://console.cloud.google.com/auth/clients) with the application type "Desktop app", and download its JSON file.
-4. Save the file as `~/.config/timetree-scraper/client_secret.json`.
+3. [Create an OAuth client ID](https://console.cloud.google.com/auth/clients) with the application type "Desktop app".
+4. Set the environment variables `TIMETREE_GOOGLE_CLIENT_ID` and `TIMETREE_GOOGLE_CLIENT_SECRET` to the client's ID and secret whenever you use `--gcal`. They are not saved anywhere, and the tool stops with a message naming any that are unset.
+
+```sh
+export TIMETREE_GOOGLE_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
+export TIMETREE_GOOGLE_CLIENT_SECRET=GOCSPX-...
+```
 
 OAuth クライアントを自分で用意する必要があります（最初の 1 回のみ）。
 
 1. [Google Cloud コンソール](https://console.cloud.google.com/)でプロジェクトを作成し、[Google Calendar API を有効](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com)にします。
 2. [OAuth 同意画面](https://console.cloud.google.com/auth/overview)を設定します。「外部」を選び、自分の Google アカウントをテストユーザーに追加します。
-3. アプリケーションの種類を「デスクトップ アプリ」として [OAuth クライアント ID を作成](https://console.cloud.google.com/auth/clients)し、JSON ファイルをダウンロードします。
-4. そのファイルを `~/.config/timetree-scraper/client_secret.json` として保存します。
+3. アプリケーションの種類を「デスクトップ アプリ」として [OAuth クライアント ID を作成](https://console.cloud.google.com/auth/clients)します。
+4. `--gcal` を使うときは、環境変数 `TIMETREE_GOOGLE_CLIENT_ID` と `TIMETREE_GOOGLE_CLIENT_SECRET` にクライアント ID とクライアント シークレットを設定してください。これらはどこにも保存されません。未設定の変数があれば、その名前を表示して終了します。
 
 ### Signing in / ログイン
 
-The first time you use `--gcal`, the tool opens a Google sign-in page in your browser (and prints its URL in case the browser does not open). After you allow access, the credentials are saved to `~/.config/timetree-scraper/token.json`, readable only by you, and later runs use them without asking. You are asked to sign in again only when the saved credentials can no longer be refreshed, for example after you revoke access. While the consent screen's publishing status is "Testing", Google expires them after 7 days. Delete `token.json` to sign out.
+The first time you use `--gcal`, the tool opens a Google sign-in page in your browser (and prints its URL in case the browser does not open). After you allow access, the credentials are saved to `~/.config/timetree-scraper/token.json`, readable only by you, and later runs use them without asking. You are asked to sign in again only when the saved credentials can no longer be used, for example after you revoke access or if `token.json` is corrupted. While the consent screen's publishing status is "Testing", Google expires them after 7 days. Delete `token.json` to sign out.
 
 Sign-in happens before scraping starts, so a problem with it, or with the calendar name, is reported straight away.
 
-初めて `--gcal` を使うと、ブラウザで Google のログイン画面が開きます（開かない場合のために URL も表示します）。アクセスを許可すると、認証情報が `~/.config/timetree-scraper/token.json`（本人のみ読み取り可）に保存され、次回以降はそれが使われます。保存された認証情報を更新できなくなった場合（アクセス権を取り消した場合など）にのみ、再度ログインを求められます。OAuth 同意画面の公開ステータスが「テスト」の間は、Google によって 7 日で失効します。ログアウトするには `token.json` を削除してください。
+初めて `--gcal` を使うと、ブラウザで Google のログイン画面が開きます（開かない場合のために URL も表示します）。アクセスを許可すると、認証情報が `~/.config/timetree-scraper/token.json`（本人のみ読み取り可）に保存され、次回以降はそれが使われます。保存された認証情報が使えなくなった場合（アクセス権を取り消した場合や `token.json` が壊れた場合など）にのみ、再度ログインを求められます。OAuth 同意画面の公開ステータスが「テスト」の間は、Google によって 7 日で失効します。ログアウトするには `token.json` を削除してください。
 
 ログインは予定の取得を始める前に行うため、ログインやカレンダー名に問題があればすぐに分かります。
 
