@@ -1,8 +1,12 @@
-# timetree-scraper-rust
+# timetree-scraper
 
-A Rust port of [timetree-scraper](https://github.com/xuanruiqi/timetree-scraper). Scrape events from a public [TimeTree](https://timetreeapp.com/) calendar and save them as JSON, as an iCalendar (`.ics`) file you can import into Google Calendar, Apple Calendar, Outlook, and others, or as a CSV file in [Google Calendar's import format](https://support.google.com/calendar/answer/37118). It can also sync the events straight into one of your Google Calendars.
+Scrape events from a public [TimeTree](https://timetreeapp.com/) calendar and save them as JSON, as an iCalendar (`.ics`) file you can import into Google Calendar, Apple Calendar, Outlook, and others, or as a CSV file in [Google Calendar's import format](https://support.google.com/calendar/answer/37118). It can also sync the events straight into one of your Google Calendars.
 
-[timetree-scraper](https://github.com/xuanruiqi/timetree-scraper) の Rust 版です。[TimeTree](https://timetreeapp.com/) の公開カレンダーから予定を取得し、JSON、iCalendar（`.ics`）、または [Google カレンダーの読み込み形式](https://support.google.com/calendar/answer/37118)に沿った CSV で保存します。ICS ファイルは Google カレンダー、Apple カレンダー、Outlook などに読み込めます。また、取得した予定を Google カレンダーに直接同期することもできます。
+[TimeTree](https://timetreeapp.com/) の公開カレンダーから予定を取得し、JSON、iCalendar（`.ics`）、または [Google カレンダーの読み込み形式](https://support.google.com/calendar/answer/37118)に沿った CSV で保存します。ICS ファイルは Google カレンダー、Apple カレンダー、Outlook などに読み込めます。また、取得した予定を Google カレンダーに直接同期することもできます。
+
+timetree-scraper has been rewritten in Rust. This version replaces the earlier Python version, which is no longer maintained.
+
+timetree-scraper は Rust で書き直されました。本バージョンは以前の Python 版に代わるもので、Python 版の保守は終了しています。
 
 The scraper opens the calendar in headless Chrome with [chromiumoxide](https://crates.io/crates/chromiumoxide), captures the `public_events` API responses the page makes, and clicks "Next month" repeatedly until a month comes back with no events. ICS files are written with [icalendar](https://crates.io/crates/icalendar).
 
@@ -17,8 +21,15 @@ The scraper opens the calendar in headless Chrome with [chromiumoxide](https://c
 ## Installation / インストール
 
 ```sh
+cargo install --git https://github.com/xuanruiqi/timetree-scraper
+
+# or, from a local checkout / ローカルのクローンから
 cargo install --path .
 ```
+
+This installs the `extract-timetree` command.
+
+`extract-timetree` コマンドがインストールされます。
 
 ## Usage / 使い方
 
