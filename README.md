@@ -139,6 +139,7 @@ Sign-in happens before scraping starts, so a problem with it, or with the calend
 - `calendar_name` is the name shown in Google Calendar's sidebar, and must be a calendar you can edit. If none of your editable calendars has that name, a new calendar with that name is created.
 - Events are read the same way as for ICS, with the same defaults, and events with no start time are skipped in the same way.
 - Each event's Google Calendar ID is derived from its TimeTree ID, so syncing again updates the events instead of duplicating them. An event deleted in Google Calendar is restored on the next sync.
+- Events that already match TimeTree are left alone, so a repeat sync mostly just reads the calendar. The rest are written several at a time. Google allows 600 requests a minute per user, so a sync of more events than that slows down to stay within the limit.
 - Each sync overwrites the title, times, description and location of the synced events, so edits you make to them in Google Calendar are lost.
 - Events removed from TimeTree are not deleted from Google Calendar.
 - Events synced this way are separate from ones imported from an ICS or CSV file, so syncing into a calendar you already imported into creates duplicates.
@@ -146,6 +147,7 @@ Sign-in happens before scraping starts, so a problem with it, or with the calend
 - `calendar_name` は Google カレンダーのサイドバーに表示される名前で、編集権限のあるカレンダーである必要があります。編集できるカレンダーにその名前のものがない場合は、その名前で新しいカレンダーを作成します。
 - 予定の各項目は ICS と同じ方法・同じ既定値で読み取り、開始日時のない予定も同様にスキップします。
 - Google カレンダー上の予定 ID は TimeTree の ID から決まるため、再度同期しても予定は重複せず、既存の予定が更新されます。Google カレンダーで削除した予定は、次回の同期で復元されます。
+- TimeTree と内容が同じ予定は書き込まないため、2 回目以降の同期はほぼ読み取りだけで済みます。それ以外の予定は複数件ずつ並行して書き込みます。Google の上限はユーザーあたり 1 分間に 600 リクエストのため、それより多くの予定を同期する場合は上限内に収まるよう速度が落ちます。
 - 同期のたびにタイトル、日時、説明、場所が上書きされるため、同期した予定を Google カレンダーで編集しても失われます。
 - TimeTree から削除された予定は、Google カレンダーからは削除されません。
 - この方法で同期した予定は ICS・CSV ファイルから読み込んだ予定とは別扱いのため、読み込み済みのカレンダーに同期すると予定が重複します。

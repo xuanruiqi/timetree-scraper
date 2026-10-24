@@ -103,8 +103,8 @@ async fn main() -> Result<()> {
     if let (Some(calendar), Some(name)) = (calendar, &args.gcal) {
         let summary = calendar.sync(&events).await;
         println!(
-            "Synced to Google Calendar \"{name}\": {} created, {} updated",
-            summary.created, summary.updated
+            "Synced to Google Calendar \"{name}\": {} created, {} updated, {} unchanged",
+            summary.created, summary.updated, summary.unchanged
         );
         if summary.failed > 0 {
             bail!(
