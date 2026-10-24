@@ -5,9 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push supersedes an older run immediately rather than queuing behind
+# it: a queued run shows no runner, no steps and no log, which looks like a hang.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,6 +19,9 @@ jobs:
   ci:
     name: Test, type check & lint
     runs-on: ubuntu-latest
+    # A cold build of all dependencies takes a few minutes; anything beyond this
+    # is stuck and should fail loudly instead of running for the 6h default.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -26,8 +31,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.3
 
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
       - name: Format
         run: cargo fmt --all --check
+
+      # Separate from the compile step so a slow download is distinguishable
+      # from a slow build in the step timings.
+      - name: Fetch dependencies
+        run: cargo fetch --locked
 
       - name: Type check
         run: cargo check --all-targets --all-features --locked
